@@ -1,0 +1,237 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function ownsShop(shopId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/shops/$(shopId)).data.ownerId
+          == request.auth.uid;
+    }
+
+    function validShopOrderStatusTransition(currentStatus, nextStatus) {
+      return (currentStatus == 'pending' && nextStatus == 'accepted')
+        || (currentStatus == 'accepted' && nextStatus == 'cooking')
+        || (currentStatus == 'cooking' && nextStatus == 'ready');
+    }
+
+    match /users/{userId} {
+      allow get: if signedIn() && request.auth.uid == userId;
+      allow list: if false;
+
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasAll([
+          'displayName',
+          'role',
+          'createdAt'
+        ])
+        && request.resource.data.createdAt == request.time
+        && (
+          (
+            request.resource.data.role == 'customer'
+            && request.resource.data.keys().hasOnly([
+              'displayName',
+              'role',
+              'createdAt'
+            ])
+          )
+          || (
+            request.resource.data.role == 'shop'
+            && request.resource.data.keys().hasOnly([
+              'displayName',
+              'role',
+              'shopId',
+              'createdAt'
+            ])
+            && request.resource.data.shopId is string
+            && getAfter(
+              /databases/$(database)/documents/shops/$(request.resource.data.shopId)
+            ).data.ownerId == request.auth.uid
+          )
+        );
+
+      allow update: if false;
+      allow delete: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /shops/{shopId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll([
+          'name',
+          'ownerId',
+          'isOpen',
+          'orderCount',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'name',
+          'ownerId',
+          'isOpen',
+          'orderCount',
+          'createdAt'
+        ])
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.isOpen == false
+        && request.resource.data.orderCount == 0
+        && request.resource.data.createdAt == request.time
+        && getAfter(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        ).data.role == 'shop'
+        && getAfter(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        ).data.shopId == shopId;
+
+      allow update: if ownsShop(shopId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['isOpen', 'updatedAt'])
+        && request.resource.data.isOpen is bool
+        && request.resource.data.updatedAt == request.time;
+
+      allow delete: if false;
+    }
+
+    match /menuItems/{menuId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll([
+          'shopId',
+          'name',
+          'price',
+          'available',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'shopId',
+          'name',
+          'price',
+          'available',
+          'createdAt',
+          'imageBase64'
+        ])
+        && request.resource.data.shopId is string
+        && ownsShop(request.resource.data.shopId)
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.price is number
+        && request.resource.data.price >= 0
+        && request.resource.data.available is bool
+        && request.resource.data.createdAt == request.time
+        && (
+          !('imageBase64' in request.resource.data)
+          || (
+            request.resource.data.imageBase64 is string
+            && request.resource.data.imageBase64.size() <= 300000
+          )
+        );
+
+      allow update: if ownsShop(resource.data.shopId)
+        && request.resource.data.shopId == resource.data.shopId
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['name', 'price', 'available', 'imageBase64'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.price is number
+        && request.resource.data.price >= 0
+        && request.resource.data.available is bool
+        && (
+          !('imageBase64' in request.resource.data)
+          || (
+            request.resource.data.imageBase64 is string
+            && request.resource.data.imageBase64.size() <= 300000
+          )
+        );
+
+      allow delete: if ownsShop(resource.data.shopId);
+    }
+
+    match /orders/{orderId} {
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll([
+          'shopId',
+          'shopName',
+          'customerId',
+          'customerName',
+          'items',
+          'total',
+          'status',
+          'note',
+          'createdAt',
+          'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'shopId',
+          'shopName',
+          'customerId',
+          'customerName',
+          'items',
+          'total',
+          'status',
+          'note',
+          'createdAt',
+          'updatedAt'
+        ])
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.shopId is string
+        && get(
+          /databases/$(database)/documents/shops/$(request.resource.data.shopId)
+        ).data.isOpen == true
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0
+        && request.resource.data.items.size() <= 20
+        && request.resource.data.total is number
+        && request.resource.data.total >= 0
+        && request.resource.data.status == 'pending'
+        && request.resource.data.note is string
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow get: if signedIn()
+        && (
+          resource.data.customerId == request.auth.uid
+          || ownsShop(resource.data.shopId)
+        );
+
+      allow list: if signedIn()
+        && (
+          resource.data.customerId == request.auth.uid
+          || ownsShop(resource.data.shopId)
+        );
+
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && (
+          (
+            ownsShop(resource.data.shopId)
+            && validShopOrderStatusTransition(
+              resource.data.status,
+              request.resource.data.status
+            )
+          )
+          || (
+            resource.data.customerId == request.auth.uid
+            && (
+              (
+                resource.data.status == 'pending'
+                && request.resource.data.status == 'cancelled'
+              )
+              || (
+                resource.data.status == 'ready'
+                && request.resource.data.status == 'completed'
+              )
+            )
+          )
+        );
+
+      allow delete: if false;
+    }
+  }
+}
